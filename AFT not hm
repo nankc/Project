@@ -1,0 +1,198 @@
+import numpy as np
+import cv2
+from matplotlib import pyplot as plt
+import tensorflow as tf
+from scipy import sparse
+from math import ceil, floor
+-----------------------------------------------------------------
+ref_image = cv2.imread(r'C:\Project\Images\R1.png',32)
+temp_image = cv2.imread(r'C:\Project\Images\T1.png',32)
+
+#resize images
+ref_image = ref_image[:-1,:] 
+temp_image = temp_image[:-1,:]
+
+figure = plt.figure(figsize=(10,10))
+figure.add_subplot(1,2,1)
+plt.title('Reference Image')
+plt.imshow(ref_image,cmap='gray',vmax=255,vmin=0)
+figure.add_subplot(1,2,2)
+plt.title('Template Image')
+plt.imshow(temp_image,cmap='gray',vmax=255,vmin=0)
+plt.show()
+print(ref_image)
+print(temp_image)
+print(ref_image.shape,temp_image.shape)
+-----------------------------------------------------------------
+#Affine transform 
+def AFT(img,Ab):
+    img = np.array(img)
+    Ab = np.array(Ab)
+    shape = img.shape
+    height = shape[0]
+    width = shape[1]
+    TransImg = np.zeros(img.shape, np.uint8)
+    for i in range(height):
+        for j in range(width):
+            coList = Ab[:,:-1].dot(np.array([i,j]))+Ab[:,-1]
+            x,y = coList[0],coList[1]
+            #Biliner Interpolation
+            if x>=0 and x<=height-1 and y>=0 and y<=width-1:            
+                cx = ceil(x)
+                fx = floor(x)
+                cy = ceil(y)
+                fy = floor(y)
+                if cx==fx:
+                    dxf = 1/2
+                    dxb = 1/2
+                else:
+                    dxf = cx-x
+                    dxb = x-fx
+                if cy==fy:
+                    dyf = 1/2
+                    dyb = 1/2
+                else:
+                    dyf = cy-y
+                    dyb = y-fy
+                TransImg[i][j] = dyb*dxb*img[cx][cy]+dyb*dxf*img[fx][cy]+dyf*dxb*img[cx][fy]+dyf*dxf*img[fx][fy]
+    return TransImg 
+--------------------------------------------------------------------------------------------------------------------------    
+#Gauss - Newton with alpha by secant
+A = np.zeros((2,3))
+A[:,:-1] = np.eye(2)
+
+A = A.reshape(6)
+Imax = 1000
+eps = 1e-3
+step_a = 1e-2
+alImax = 100
+aleps = 1e-2
+#alpha = 1e-1
+
+N = temp_image.size
+F = AFT(temp_image,A.reshape(2,3))
+da = (np.float16(F)-np.float16(ref_image)).reshape(N)/255
+ssd0 = (np.linalg.norm(da)**2)/2
+print('ssd0=',ssd0)
+print('N = ',N)
+print('A = ',A)
+print('F =',F)
+print('da = ',da)
+print('refimg = ',ref_image)
+plt.imshow(np.uint8(255*abs(da.reshape(ref_image.shape))),cmap='gray')
+plt.show()
+
+for k in range(Imax):
+    JacT = np.zeros((6,N))
+    for i in range(6):
+        Adf = A.copy()
+        Adf[i]+=step_a
+        Adb = A.copy()
+        Adb[i]-=step_a
+        Faf = AFT(temp_image,Adf.reshape(2,3)) #forward
+        Fab = AFT(temp_image,Adb.reshape(2,3)) #backward
+        dai = (np.float16(Faf)-np.float16(Fab))/255/(2*step_a) 
+        JacT[i] = dai.reshape(N)
+    H = JacT.dot(np.transpose(JacT))
+    invH = np.linalg.inv(H)
+    grad = JacT.dot(da)
+    
+#print('JacT =',JacT)
+    #find alpha
+    alpha_old = 2e-3
+    Aal_old = A - alpha_old*grad
+    Fal_old = AFT(temp_image,Aal_old.reshape(2,3))
+    daal_old = (np.float16(Fal_old)-np.float16(ref_image)).reshape(N)/255
+    ssdal_old = (np.linalg.norm(daal_old)**2)/2
+    alpha = 1e-3
+    for j in range(alImax):
+        Aal = A - alpha*grad
+        Fal = AFT(temp_image,Aal.reshape(2,3))
+        daal = (np.float16(Fal)-np.float16(ref_image)).reshape(N)/255
+        ssdal = (np.linalg.norm(daal)**2)/2
+        if abs(ssdal-ssdal_old)<aleps: #avoid devided by zero
+            break
+        alpha_new = alpha - ssdal*(alpha-alpha_old)/(ssdal-ssdal_old)
+        if abs((alpha_new-alpha)/alpha)<aleps:
+            alpha = alpha_new
+            break
+        alpha_old = alpha
+        ssdal_old = ssdal
+        alpha = alpha_new
+    
+    A_old = A.copy()
+    A -= alpha*invH.dot(grad)
+    F = AFT(temp_image,A.reshape(2,3))
+    da = (np.float16(F)-np.float16(ref_image)).reshape(N)/255
+    ssd = (np.linalg.norm(da)**2)/2
+    diff = np.linalg.norm(A-A_old)
+#     print('A = ',A)
+#     print('F =',F)
+#     print('da = ',da)
+#     print('ssd =',ssd)
+#     print('diff = ',diff)
+    
+    if (k+1)%1==0:
+        print(k+1,'diif=',diff,'ssd=',ssd)
+        print('alpha',alpha,'\n',A.reshape(2,3))
+        #plt.imshow(F,cmap='gray')
+        plt.imshow(np.uint8(255*abs(da.reshape(ref_image.shape))),cmap='gray')
+        plt.show()
+    if diff<eps:
+        print('A does not change')
+        break
+    if (ssd/ssd0)<eps:
+        print('Converge')
+        break   
+        
+print(A)
+-----------------------------------------------------------------------------------------------
+#Gauss - Newton with constant alpha
+A = np.zeros((2,3))
+A[:,:-1] = np.eye(2)
+A = A.reshape(6)
+Imax = 1000
+eps = 1e-3
+step_a = 1e-2
+alpha = 1e-1
+
+N = temp_image.size
+F = AFT(temp_image,A.reshape(2,3))
+da = (np.float16(F)-np.float16(ref_image)).reshape(N)/255
+ssd0 = (np.linalg.norm(da)**2)/2
+print(0,'ssd=',ssd0)
+plt.imshow(np.uint8(255*abs(da.reshape(ref_image.shape))),cmap='gray')
+plt.show()
+
+for k in range(Imax):
+    JacT = np.zeros((6,N))
+    for i in range(6):
+        Adf = A.copy()
+        Adf[i]+=step_a
+        Adb = A.copy()
+        Adb[i]-=step_a
+        Faf = AFT(temp_image,Adf.reshape(2,3)) #forward
+        Fab = AFT(temp_image,Adb.reshape(2,3)) #backward
+        dai = (np.float16(Faf)-np.float16(Fab))/255/(2*step_a) 
+        JacT[i] = dai.reshape(N)
+    H = JacT.dot(np.transpose(JacT))
+    invH = np.linalg.inv(H)
+    grad = JacT.dot(da)
+    A_old = A.copy()
+    A -= alpha*invH.dot(grad)
+    F = AFT(temp_image,A.reshape(2,3))
+    da = (np.float16(F)-np.float16(ref_image)).reshape(N)/255
+    ssd = (np.linalg.norm(da)**2)/2
+    diff = np.linalg.norm(A-A_old)
+    
+    if (k+1)%20==0:
+        print(k+1,'diif=',diff,'ssd=',ssd)
+        #plt.imshow(F,cmap='gray')
+        plt.imshow(np.uint8(255*abs(da.reshape(ref_image.shape))),cmap='gray')
+        plt.show()
+    if diff<eps:
+        print('A does not change')
+        break
+    if (ssd/ssd0)<eps:
+        print('Converge')
+        break   
