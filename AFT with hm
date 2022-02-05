@@ -1,0 +1,263 @@
+import numpy as np
+import cv2
+from matplotlib import pyplot as plt
+import tensorflow as tf
+from scipy import sparse
+from math import ceil, floor
+import tensorflow.keras
+------------------------------------------------
+ref_image = cv2.imread(r'C:\Project\Images\t3_R.png',32)
+temp_image = cv2.imread(r'C:\Project\Images\R1.png',32)
+
+#resize images
+ref_image = ref_image[:-1,:] 
+temp_image = temp_image[:-1,:]
+
+figure = plt.figure(figsize=(10,10))
+figure.add_subplot(1,2,1)
+plt.title('Reference Image')
+plt.imshow(ref_image,cmap='gray',vmax=255,vmin=0)
+figure.add_subplot(1,2,2)
+plt.title('Template Image')
+plt.imshow(temp_image,cmap='gray',vmax=255,vmin=0)
+plt.show()
+print(ref_image)
+print(temp_image)
+print(ref_image.shape,temp_image.shape)
+-------------------------------------------------------
+img_shape = (160,160)
+ref_image = cv2.resize(ref_image,img_shape,interpolation=cv2.INTER_CUBIC)
+img_shape = (160,160)
+temp_image = cv2.resize(temp_image,img_shape,interpolation=cv2.INTER_CUBIC)
+--------------------------------------------------------
+#Affine transform with Ab = A*(img_coordinate)+b
+def AFT(img,Ab):
+    img = np.array(img)
+    Ab = np.array(Ab)
+    shape = img.shape
+    height = shape[0]
+    width = shape[1]
+    TransImg = np.zeros(img.shape, np.uint8)
+    for i in range(height):
+        for j in range(width):
+            coList = Ab[:,:-1].dot(np.array([i,j]))+Ab[:,-1]
+            x,y = coList[0],coList[1]
+            #Biliner Interpolation
+            if x>=0 and x<=height-1 and y>=0 and y<=width-1:            
+                cx = ceil(x)
+                fx = floor(x)
+                cy = ceil(y)
+                fy = floor(y)
+                if cx==fx:
+                    dxf = 1/2
+                    dxb = 1/2
+                else:
+                    dxf = cx-x
+                    dxb = x-fx
+                if cy==fy:
+                    dyf = 1/2
+                    dyb = 1/2
+                else:
+                    dyf = cy-y
+                    dyb = y-fy
+                TransImg[i][j] = dyb*dxb*img[cx][cy]+dyb*dxf*img[fx][cy]+dyf*dxb*img[cx][fy]+dyf*dxf*img[fx][fy]
+    return TransImg 
+    ------------------------------------------------------------------------------------------------
+    #Gauss - Newton with alpha by secant
+A = np.zeros((2,3))
+A[:,:-1] = np.eye(2)
+
+A = A.reshape(6)
+Imax = 100
+eps1 = 1e-5
+eps2 = 0.3
+step_a = 1e-2
+alImax = 5
+aleps = 1e-2
+#alpha = 1e-1
+
+N = temp_image.size
+F = AFT(temp_image,A.reshape(2,3))
+da = (np.float16(F)-np.float16(ref_image)).reshape(N)/255 ##+h
+ssd0 = (np.linalg.norm(da)**2)/2
+print('ssd0=',ssd0)
+print('N = ',N)
+print('A = ',A)
+print('F =',F)
+print('da = ',da)
+print('refimg = ',ref_image)
+plt.imshow(np.uint8(255*abs(da.reshape(ref_image.shape))),cmap='gray')
+plt.show()
+
+for k in range(Imax):
+    JacT = np.zeros((6,N))
+    for i in range(6):
+        Adf = A.copy()
+        Adf[i]+=step_a
+        Adb = A.copy()
+        Adb[i]-=step_a
+        Faf = AFT(temp_image,Adf.reshape(2,3)) #forward
+        Fab = AFT(temp_image,Adb.reshape(2,3)) #backward
+        dai = (np.float16(Faf)-np.float16(Fab))/255/(2*step_a) 
+        JacT[i] = dai.reshape(N)
+    H = JacT.dot(np.transpose(JacT))
+    invH = np.linalg.inv(H)
+    grad = JacT.dot(da)
+    
+#print('JacT =',JacT)
+    #find alpha
+    alpha_old = 0.001
+    Aal_old = A - alpha_old*grad
+    Fal_old = AFT(temp_image,Aal_old.reshape(2,3))
+    daal_old = (np.float16(Fal_old)-np.float16(ref_image)).reshape(N)/255
+    ssdal_old = (np.linalg.norm(daal_old)**2)/2
+    alpha = 1
+    for j in range(alImax):
+        Aal = A - alpha*grad
+        Fal = AFT(temp_image,Aal.reshape(2,3))
+        daal = (np.float16(Fal)-np.float16(ref_image)).reshape(N)/255
+        ssdal = (np.linalg.norm(daal)**2)/2
+        alpha_new = alpha - ssdal*(alpha-alpha_old)/(ssdal-ssdal_old)
+        if abs(ssdal-ssdal_old)<aleps: #avoid devided by zero
+            print('ssdal_old =',ssdal_old)
+            print('ssdal =',ssdal)
+            print('|Phi(alpha) - Phi(alpha_old)|<eps','j =',j)
+        elif abs((alpha_new-alpha)/alpha)<aleps:
+            alpha = alpha_new
+            print('|alpha_new - alpha_old|<eps','j =',j)
+            break
+        alpha_old = alpha
+        alpha = alpha_new
+        ssdal_old = ssdal
+        
+    A_old = A.copy()
+    A -= alpha*invH.dot(grad)
+    F = AFT(temp_image,A.reshape(2,3))
+    da = (np.float16(F)-np.float16(ref_image)).reshape(N)/255
+    ssd = (np.linalg.norm(da)**2)/2
+    diff = np.linalg.norm(A-A_old)
+#     print('A = ',A)
+#     print('F =',F)
+#     print('da = ',da)
+#     print('ssd =',ssd)
+#     print('diff = ',diff)
+    
+    if (k+1)%1==0:
+        print('Iter =',k+1,'|A-A_old|=',diff,'Rel_ssd=',ssd/ssd0)
+        print('alpha',alpha,'\n','A = ',A.reshape(2,3))
+        print(daal_old)        
+        print(daal) 
+        #plt.imshow(F,cmap='gray')
+        plt.imshow(np.uint8(255*abs(da.reshape(ref_image.shape))),cmap='gray')
+        plt.show()
+        
+    if diff<eps1:
+        print('A does not change')
+        break
+    elif (ssd/ssd0)<eps2:
+        print('Converge')
+        break   
+        
+print(A)
+---------------------------------------------------------------------------------------------------
+figure = plt.figure(figsize=(10,10))
+figure.add_subplot(1,3,1)
+plt.title('Reference Image')
+plt.imshow(ref_image,cmap='gray',vmax=255,vmin=0)
+figure.add_subplot(1,3,2)
+plt.title('Template Image')
+plt.imshow(temp_image,cmap='gray',vmax=255,vmin=0)
+figure.add_subplot(1,3,3)
+plt.title('Register Image')
+plt.imshow(F,cmap='gray',vmax=255,vmin=0)
+plt.show()
+# print(ref_image)
+# print(temp_image)
+# print(ref_image.shape,temp_image.shape)
+-------------------------------------------------------------------------------------------
+img_shape = (160,160)
+ref_image = cv2.resize(ref_image,img_shape,interpolation=cv2.INTER_CUBIC)
+img_shape = (160,160)
+temp_image = cv2.resize(temp_image,img_shape,interpolation=cv2.INTER_CUBIC)
+-------------------------------------------------------------------------------------------
+ref_image.shape
+--------------------------------------------------------------------------------------------
+base_model = tf.keras.applications.vgg16.VGG16(include_top=False,input_shape=img_shape+(3,))
+layer = tf.keras.layers.experimental.preprocessing.Normalization(dtype='float32')
+layer_names = ['block1_conv2','block2_conv2','block3_conv3','block4_conv3','block5_conv3']
+base_model_outputs = [base_model.get_layer(name).output for name in layer_names]
+down_stack = tf.keras.Model(inputs=base_model.input, outputs=base_model_outputs,name='down_stack')
+down_stack.trainable = False
+
+inputs = tf.keras.layers.Input(shape=img_shape+(3,))
+# Downsampling through the model
+skips = down_stack(inputs)
+x = skips.pop()
+skips = skips[::-1]
+# Upsampling and establishing the skip connections
+up = tf.keras.layers.UpSampling2D(2)
+
+for skip in skips:
+    x = up(x)
+    concat = tf.keras.layers.Concatenate()
+    x = concat([x, skip])
+    x = tf.keras.layers.Conv2D(x.shape[3]/4,3,activation='relu',padding='same')(x)
+x = tf.keras.layers.Conv2D(1,3,padding='same')(x)
+
+heatmap_model_new = tf.keras.Model(inputs=inputs, outputs=x,name='heatmap_model_new')
+heatmap_model_new.summary()
+Wsave_new = heatmap_model_new.get_weights()
+-------------------------------------------------------------------------------------------
+def hm_fn(h,step_t=1e-5,dc_eps=1e-2):
+    t = 0
+    step_new = step_t
+    amp = 2
+    while True:   
+        hm = tf.clip_by_value(h+t,-np.inf,0)+tf.clip_by_value(h-t,0,np.inf)
+        diff_cost = abs(tf.reduce_sum((ref_img+hm-warped_img)**2)-tf.reduce_sum((ref_img-warped_img)**2))
+        if diff_cost<dc_eps :
+            if step_new==step_t:
+                break
+            t = t_old
+            step_new/=amp
+            t+=step_new
+        else:
+            t_old = t
+            step_new*=amp
+            t+=step_new
+    return hm
+    ------------------------------------------------------------------------------------------
+    # image in shape multiple of 32 with range 0-1
+ref_img = ref_image
+warped_img = temp_image
+# layer = tf.keras.layers.experimental.preprocessing.Normalization(dtype='float32')
+heatmap_model_new.set_weights(Wsave_new) #reinitailize all weights
+update_h = 50
+optimizer = tf.keras.optimizers.SGD(learning_rate=1e-5)
+for _ in range(update_h):
+    with tf.GradientTape() as tape_new:
+        input_img_new = tf.expand_dims(tf.tile(tf.expand_dims(ref_img,-1),(1,1,3)),0)
+        h_new = tf.squeeze(heatmap_model_new(input_img_new))
+        h_new = h_new/tf.sqrt(tf.reduce_sum(h_new**2))
+        hm = hm_fn(h_new,dc_eps=1)
+        loss_value_new = tf.reduce_sum((ref_img+hm-warped_img)**2)/2
+    grads_new = tape_new.gradient(loss_value_new, heatmap_model_new.trainable_weights)
+    optimizer.apply_gradients(zip(grads_new, heatmap_model_new.trainable_weights))
+    ------------------------------------------------------------------------------------------------
+    heatmap_model_new.set_weights(Wsave_new) #reinitailize all weights
+update_h = 25
+optimizer = tf.keras.optimizers.SGD(learning_rate=1e-5)
+
+for _ in range(25)
+    # image in shape multiple of 32 with range 0-1
+    ref_img = 
+    warped_img = 
+    for _ in range(update_h):
+        with tf.GradientTape() as tape_new:
+            input_img_new = tf.expand_dims(tf.tile(tf.expand_dims(ref_img,-1),(1,1,3)),0)
+            h_new = tf.squeeze(heatmap_model_new(input_img_new))
+            h_new = h_new/tf.sqrt(tf.reduce_sum(h_new**2))
+            hm = hm_fn(h_new,dc_eps=1)
+            loss_value_new = tf.reduce_sum((ref_img+hm-warped_img)**2)/2
+        grads_new = tape_new.gradient(loss_value_new, heatmap_model_new.trainable_weights)
+        optimizer.apply_gradients(zip(grads_new, heatmap_model_new.trainable_weights))
